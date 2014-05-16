@@ -1,0 +1,43 @@
+Source: gerrymander
+Section: python
+Priority: optional
+Maintainer: Guido Günther <agx@sigxcpu.org>
+Build-Depends: debhelper (>= 8.0.0),
+ debhelper (>= 9),
+ dh-python,
+ python-all,
+ python-setuptools,
+ python3-all,
+ python3-setuptools,
+ python-nose,
+ python3-nose,
+Standards-Version: 3.9.5
+X-Python-Version: >= 2.7
+X-Python3-Version: >= 3.2
+
+Package: python-gerrymander
+Architecture: all
+Depends: ${misc:Depends}, python-prettytable
+Description: Python module for interacting with the Gerrit code review system
+ Gerrymander provides a set of Python2 / Python3 compatible modules for
+ interacting with Gerrit like querying open reviews.
+ .
+ This is the python3 version of the package.
+
+Package: python3-gerrymander
+Architecture: all
+Depends: ${misc:Depends}, python3-prettytable
+Description: Python module for interacting with the Gerrit code review system
+ Gerrymander provides a set of Python2 / Python3 compatible modules for
+ interacting with Gerrit like querying open reviews.
+ .
+ This is the python3 version of the package.
+
+Package: gerrymander
+Architecture: all
+Depends: ${misc:Depends}, python-gerrymander, python3
+Description: Client for interacting with the Gerrit code review system
+ Gerrymander provides a set of Python2 / Python3 compatible modules for
+ interacting with Gerrit like querying open reviews.
+ .
+ This package provides the command line client.

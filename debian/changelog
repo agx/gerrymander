@@ -1,0 +1,5 @@
+gerrymander (1.1-1) unstable; urgency=low
+
+  * Initial release (Closes: #748324)
+
+ -- Guido Günther <agx@sigxcpu.org>  Fri, 16 May 2014 09:05:49 +0200
