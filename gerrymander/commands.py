@@ -19,12 +19,15 @@ from gerrymander.operations import OperationQuery
 from gerrymander.operations import OperationWatch
 from gerrymander.reports import ReportOutput
 from gerrymander.reports import ReportPatchReviewStats
+from gerrymander.reports import ReportPatchReviewRate
 from gerrymander.reports import ReportOpenReviewStats
 from gerrymander.reports import ReportChanges
 from gerrymander.reports import ReportToDoListMine
 from gerrymander.reports import ReportToDoListOthers
 from gerrymander.reports import ReportToDoListAnyones
 from gerrymander.reports import ReportToDoListNoones
+from gerrymander.reports import ReportToDoListApprovable
+from gerrymander.reports import ReportToDoListExpirable
 from gerrymander.format import format_color
 from gerrymander.model import ModelEventCommentAdd
 from gerrymander.model import ModelEventPatchCreate
@@ -32,6 +35,7 @@ from gerrymander.model import ModelEventChangeMerge
 from gerrymander.model import ModelEventChangeAbandon
 from gerrymander.model import ModelEventChangeRestore
 from gerrymander.model import ModelApproval
+from gerrymander.pager import start_pager, stop_pager
 
 import getpass
 import os
@@ -168,6 +172,7 @@ class Command(object):
         super(Command, self).__init__()
         self.name = name
         self.help = help
+        self.pager = True
 
     def add_option(self, parser, config, *args, **kwargs):
         if args[0][0:1] == "-":
@@ -190,7 +195,7 @@ class Command(object):
             else:
                 kwargs["default"] = config.get_option_string(section, name)
 
-        parser.add_argument(*args, **kwargs)
+        return parser.add_argument(*args, **kwargs)
 
 
     def add_options(self, parser, config):
@@ -206,9 +211,15 @@ class Command(object):
         raise NotImplementedError("Subclass should override run method")
 
     def execute(self, config, options):
-        client = self.get_client(config, options)
-        self.run(config, client, options)
+        if self.pager:
+            start_pager()
+        try:
+            client = self.get_client(config, options)
 
+            self.run(config, client, options)
+        finally:
+            if self.pager:
+                stop_pager()
 
 
 class CommandCaching(Command):
@@ -311,6 +322,8 @@ class CommandWatch(CommandProject):
     def __init__(self, name="watch", help="Watch incoming changes"):
         super(CommandWatch, self).__init__(name, help)
 
+        self.pager = False
+
     def add_options(self, parser, config):
         super(CommandWatch, self).add_options(parser, config)
 
@@ -341,7 +354,7 @@ class CommandWatch(CommandProject):
     def format_approvals(approvals):
         bits = []
         for approval in approvals:
-            if approval.action == ModelApproval.ACTION_APPROVED and approval.value > 0:
+            if approval.action == ModelApproval.ACTION_WORKFLOW and approval.value > 0:
                 bits.append("+A")
             elif approval.action == ModelApproval.ACTION_REVIEWED:
                 if approval.value > 0:
@@ -361,6 +374,9 @@ class CommandWatch(CommandProject):
 
     @staticmethod
     def format_event(event, bots, projects, usecolor):
+        if event.user is None or event.change is None:
+            return
+
         if event.is_user_in_list(bots):
             return
         if len(projects) > 0 and event.change.project not in projects:
@@ -428,7 +444,7 @@ class CommandReport(Command):
 
         self.add_option(parser, config,
                         "-m", "--mode", default=ReportOutput.DISPLAY_MODE_TEXT,
-                        help="Display output in 'text', 'json', 'xml'")
+                        help="Display output in 'text', 'json', 'xml', 'csv'")
         self.add_option(parser, config,
                         "--color", default=False, action="store_true",
                         help="Use terminal color highlighting")
@@ -454,9 +470,9 @@ class CommandReportTable(CommandReport):
                         "-l", "--limit", default=None,
                         help="Limit to N results")
 
-        self.add_option(parser, config,
-                        "--sort", default=None,
-                        help="Set the sort field")
+        self.sort_option = self.add_option(parser, config,
+                                           "--sort", default=None,
+                                           help="Set the sort field")
         self.add_option(parser, config,
                         "--field", default=[],
                         action="append",
@@ -534,6 +550,35 @@ class CommandPatchReviewStats(CommandProject, CommandCaching, CommandReportTable
         return super(CommandPatchReviewStats, self).run(config, client, options)
 
 
+class CommandPatchReviewRate(CommandProject, CommandCaching, CommandReportTable):
+
+    def __init__(self, name="patchreviewrate", help="Daily review rate averaged per week"):
+        super(CommandPatchReviewRate, self).__init__(name, help)
+        self.teams = {}
+        self.set_long_cache(True)
+
+    def get_report(self, config, client, options):
+        if options.all_groups:
+            groups = config.get_organization_groups()
+        else:
+            groups = options.group
+
+        teams = {}
+        for team in config.get_organization_teams():
+            teams[team] = []
+            for group in groups:
+                users = config.get_group_team_members(group, team)
+                teams[team].extend(users)
+
+        return ReportPatchReviewRate(client,
+                                     self.get_projects(config, options, True),
+                                     teams,
+                                     usecolor=options.color)
+
+    def run(self, config, client, options):
+        return super(CommandPatchReviewRate, self).run(config, client, options)
+
+
 class CommandOpenReviewStats(CommandProject, CommandCaching, CommandReportTable):
 
     def __init__(self, name="openreviewstats", help="Statistics on open patch reviews"):
@@ -550,11 +595,15 @@ class CommandOpenReviewStats(CommandProject, CommandCaching, CommandReportTable)
         self.add_option(parser, config,
                         "--days", default=7,
                         help="Show count waiting more than N days")
+        self.add_option(parser, config,
+                        "--topic", default="",
+                        help="Set topic name to query")
 
     def get_report(self, config, client, options):
         return ReportOpenReviewStats(client,
                                      self.get_projects(config, options, True),
                                      options.branch,
+                                     options.topic,
                                      int(options.days),
                                      usecolor=options.color)
 
@@ -583,6 +632,9 @@ class CommandChanges(CommandProject, CommandCaching, CommandReportTable):
                         "--branch", action="append", default=[],
                         help="Filter based on branch")
         self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on topic")
+        self.add_option(parser, config,
                         "--message", action="append", default=[],
                         help="Filter based on message")
         self.add_option(parser, config,
@@ -597,6 +649,7 @@ class CommandChanges(CommandProject, CommandCaching, CommandReportTable):
         self.add_option(parser, config,
                         "file", default=[], nargs="*",
                         help="File name matches")
+        self.sort_option.choices = [c.key for c in ReportChanges.COLUMNS]
 
     def get_report(self, config, client, options):
         return ReportChanges(client,
@@ -604,6 +657,7 @@ class CommandChanges(CommandProject, CommandCaching, CommandReportTable):
                              status=options.status,
                              reviewers=options.reviewer,
                              branches=options.branch,
+                             topics=options.topic,
                              messages=options.message,
                              owners=options.owner,
                              approvals=options.approval,
@@ -616,6 +670,18 @@ class CommandToDoMine(CommandProject, CommandCaching, CommandReportTable):
     def __init__(self, name="todo-mine", help="List of changes I've looked at before"):
         super(CommandToDoMine, self).__init__(name, help)
 
+    def add_options(self, parser, config):
+        super(CommandToDoMine, self).add_options(parser, config)
+
+        self.add_option(parser, config,
+                        "--branch", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on topic")
+        self.add_option(parser, config,
+                        "file", default=[], nargs="*",
+                        help="File name matches")
 
     def get_report(self, config, client, options):
         username = config.get_server_username()
@@ -625,6 +691,9 @@ class CommandToDoMine(CommandProject, CommandCaching, CommandReportTable):
         return ReportToDoListMine(client,
                                   username=username,
                                   projects=self.get_projects(config, options),
+                                  branches=options.branch,
+                                  files=options.file,
+                                  topics=options.topic,
                                   usecolor=options.color)
 
 
@@ -632,6 +701,19 @@ class CommandToDoOthers(CommandProject, CommandCaching, CommandReportTable):
 
     def __init__(self, name="todo-others", help="List of changes I've not looked at before"):
         super(CommandToDoOthers, self).__init__(name, help)
+
+    def add_options(self, parser, config):
+        super(CommandToDoOthers, self).add_options(parser, config)
+
+        self.add_option(parser, config,
+                        "--branch", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "file", default=[], nargs="*",
+                        help="File name matches")
 
     def get_report(self, config, client, options):
         username = config.get_server_username()
@@ -641,6 +723,9 @@ class CommandToDoOthers(CommandProject, CommandCaching, CommandReportTable):
         return ReportToDoListOthers(client,
                                     username=username,
                                     projects=self.get_projects(config, options),
+                                    branches=options.branch,
+                                    files=options.file,
+                                    topics=options.topic,
                                     usecolor=options.color)
 
 
@@ -648,6 +733,19 @@ class CommandToDoAnyones(CommandProject, CommandCaching, CommandReportTable):
 
     def __init__(self, name="todo-anyones", help="List of changes anyone has looked at"):
         super(CommandToDoAnyones, self).__init__(name, help)
+
+    def add_options(self, parser, config):
+        super(CommandToDoAnyones, self).add_options(parser, config)
+
+        self.add_option(parser, config,
+                        "--branch", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on topic")
+        self.add_option(parser, config,
+                        "file", default=[], nargs="*",
+                        help="File name matches")
 
     def get_report(self, config, client, options):
         username = config.get_server_username()
@@ -658,6 +756,9 @@ class CommandToDoAnyones(CommandProject, CommandCaching, CommandReportTable):
                                      username=username,
                                      bots=config.get_organization_bots(),
                                      projects=self.get_projects(config, options),
+                                     branches=options.branch,
+                                     files=options.file,
+                                     topics=options.topic,
                                      usecolor=options.color)
 
 
@@ -666,11 +767,94 @@ class CommandToDoNoones(CommandProject, CommandCaching, CommandReportTable):
     def __init__(self, name="todo-noones", help="List of changes no one has looked at yet"):
         super(CommandToDoNoones, self).__init__(name, help)
 
+    def add_options(self, parser, config):
+        super(CommandToDoNoones, self).add_options(parser, config)
+
+        self.add_option(parser, config,
+                        "--branch", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on topic")
+        self.add_option(parser, config,
+                        "file", default=[], nargs="*",
+                        help="File name matches")
+
     def get_report(self, config, client, options):
         return ReportToDoListNoones(client,
                                     bots=config.get_organization_bots(),
                                     projects=self.get_projects(config, options),
+                                    branches=options.branch,
+                                    files=options.file,
+                                    topics=options.topic,
                                     usecolor=options.color)
+
+
+class CommandToDoApprovable(CommandProject, CommandCaching, CommandReportTable):
+
+    def __init__(self, name="todo-approvable", help="List of changes that I can approve"):
+        super(CommandToDoApprovable, self).__init__(name, help)
+
+    def add_options(self, parser, config):
+        super(CommandToDoApprovable, self).add_options(parser, config)
+
+        self.add_option(parser, config,
+                        "--branch", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on topic")
+        self.add_option(parser, config,
+                        "--strict", action="store_true", default=False,
+                        help="Exclude changes with any negative code reviews")
+        self.add_option(parser, config,
+                        "file", default=[], nargs="*",
+                        help="File name matches")
+
+    def get_report(self, config, client, options):
+        username = config.get_server_username()
+        if username is None:
+            username = getpass.getuser()
+
+        return ReportToDoListApprovable(client,
+                                        username=username,
+                                        strict=options.strict,
+                                        projects=self.get_projects(config, options),
+                                        branches=options.branch,
+                                        files=options.file,
+                                        topics=options.topic,
+                                        usecolor=options.color)
+
+
+class CommandToDoExpirable(CommandProject, CommandCaching, CommandReportTable):
+
+    def __init__(self, name="todo-expirable", help="List of stale changes that can be expired"):
+        super(CommandToDoExpirable, self).__init__(name, help)
+
+    def add_options(self, parser, config):
+        super(CommandToDoExpirable, self).add_options(parser, config)
+
+        self.add_option(parser, config,
+                        "--branch", action="append", default=[],
+                        help="Filter based on branch")
+        self.add_option(parser, config,
+                        "--topic", action="append", default=[],
+                        help="Filter based on topic")
+        self.add_option(parser, config,
+                        "--age", default="28",
+                        help="Set age cutoff in days")
+        self.add_option(parser, config,
+                        "file", default=[], nargs="*",
+                        help="File name matches")
+
+    def get_report(self, config, client, options):
+        return ReportToDoListExpirable(client,
+                                       age=int(options.age),
+                                       projects=self.get_projects(config, options),
+                                       branches=options.branch,
+                                       files=options.file,
+                                       topics=options.topic,
+                                       usecolor=options.color)
 
 
 class CommandComments(CommandCaching):
@@ -767,9 +951,14 @@ class CommandComments(CommandCaching):
             comments = []
             comments.extend(patch.comments)
 
-            prefix = "Patch Set %d" % patch.number
+            prefix = "Patch Set %d:" % patch.number
+            abandoned = 0
             for comment in change.comments:
                 if comment.message.startswith(prefix):
+                    comments.append(comment)
+                    if comment.message.startswith(prefix + ": Abandoned"):
+                        abandoned = patch.number
+                elif comment.message.startswith("Restored") and abandoned == patch.number:
                     comments.append(comment)
 
             CommandComments.format_comments(comments, bots, usecolor)
@@ -832,7 +1021,10 @@ class CommandTool(object):
         self.add_command(subparser, config, CommandToDoAnyones)
         self.add_command(subparser, config, CommandToDoMine)
         self.add_command(subparser, config, CommandToDoOthers)
+        self.add_command(subparser, config, CommandToDoApprovable)
+        self.add_command(subparser, config, CommandToDoExpirable)
         self.add_command(subparser, config, CommandPatchReviewStats)
+        self.add_command(subparser, config, CommandPatchReviewRate)
         self.add_command(subparser, config, CommandOpenReviewStats)
         self.add_command(subparser, config, CommandChanges)
         self.add_command(subparser, config, CommandComments)

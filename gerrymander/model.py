@@ -57,8 +57,7 @@ class ModelFile(ModelBase):
 class ModelApproval(ModelBase):
     ACTION_VERIFIED = "Verified"
     ACTION_REVIEWED = "Code-Review"
-    ACTION_APPROVED = "APRV"
-    ACTION_SUBMITTED = "SUBM"
+    ACTION_WORKFLOW = "Workflow"
 
     def __init__(self, action, value, description, grantedOn=None, user=None):
         self.action = action
@@ -93,6 +92,11 @@ class ModelApproval(ModelBase):
         if self.value < 0:
             return True
         return False
+
+    def get_age(self, now=None):
+        if now is None:
+            now = time.time()
+        return now - self.grantedOn
 
     @staticmethod
     def from_json(data):
@@ -162,6 +166,15 @@ class ModelPatch(ModelBase):
                 return True
         return False
 
+    def get_reviewer_nack_age(self, now):
+        age = 0
+        for approval in self.approvals:
+            if approval.is_reviewer_nack():
+                thisage = approval.get_age(now)
+                if (age == 0) or (thisage < age):
+                    age = thisage
+        return age
+
     def get_age(self, now):
         if len(self.approvals) == 0:
             return now - self.createdOn
@@ -194,6 +207,15 @@ class ModelPatch(ModelBase):
             if approval.is_user_in_list(includeusers):
                 hasReviewers = True
         return hasReviewers
+
+    def has_current_approval(self, action, value):
+        '''Determine if the change has an approval vote
+        of the requested type and value'''
+        for approval in self.approvals:
+            if (approval.action == action and
+                approval.value == value):
+                return True
+        return False
 
     @staticmethod
     def from_json(data):
@@ -278,6 +300,12 @@ class ModelChange(ModelBase):
             return 0
         return patch.get_age(time.time())
 
+    def get_current_reviewer_nack_age(self):
+        patch = self.get_current_patch()
+        if patch is None:
+            return 0
+        return patch.get_reviewer_nack_age(time.time())
+
     @staticmethod
     def is_user_in_list(users, user):
         if user.username is not None and user.username in users:
@@ -323,6 +351,19 @@ class ModelChange(ModelBase):
         if patch is None:
             return False
         return patch.has_other_reviewers(excludeusers)
+
+    def has_owner(self, includeusers):
+        '''Determine if the change is owned by anyone
+        in 'incldueusers' list.'''
+        return self.is_user_in_list(includeusers, self.owner)
+
+    def has_current_approval(self, action, value):
+        '''Determine if the change has an approval vote
+        of the requested type and value'''
+        patch = self.get_current_patch()
+        if patch is None:
+            return False
+        return patch.has_current_approval(action, value)
 
     @staticmethod
     def from_json(data):
@@ -382,9 +423,11 @@ class ModelEvent(ModelBase):
         elif data["type"] == "change-restored":
             return ModelEventChangeRestore.from_json(data)
         elif data["type"] == "ref-updated":
-            pass
-        elif data["type"] == "reviewed-added":
-            pass
+            return ModelEventRefUpdated.from_json(data)
+        elif data["type"] == "reviewer-added":
+            return ModelEventReviewerAdded.from_json(data)
+        elif data["type"] == "topic-changed":
+            return ModelEventTopicChanged.from_json(data)
         else:
             raise Exception("Unknown event '%s'" % data["type"])
 
@@ -456,3 +499,41 @@ class ModelEventChangeRestore(ModelEvent):
         change = ModelChange.from_json(data["change"])
         user = ModelUser.from_json(data["restorer"])
         return ModelEventChangeRestore(change, None, user)
+
+
+class ModelEventReviewerAdded(ModelEvent):
+
+    def __init__(self, change, patch, user):
+        ModelEvent.__init__(self, change, patch, user)
+
+    @staticmethod
+    def from_json(data):
+        change = ModelChange.from_json(data["change"])
+        user = ModelUser.from_json(data["reviewer"])
+        return ModelEventReviewerAdded(change, None, user)
+
+
+class ModelEventTopicChanged(ModelEvent):
+
+    def __init__(self, change, patch, user):
+        ModelEvent.__init__(self, change, patch, user)
+
+    @staticmethod
+    def from_json(data):
+        change = ModelChange.from_json(data["change"])
+        user = ModelUser.from_json(data["changer"])
+        return ModelEventTopicChanged(change, None, user)
+
+
+class ModelEventRefUpdated(ModelEvent):
+
+    def __init__(self, change, patch, user):
+        ModelEvent.__init__(self, change, patch, user)
+
+    @staticmethod
+    def from_json(data):
+        submitter = data.get("submitter", None)
+        user = None
+        if submitter is not None:
+            user = ModelUser.from_json(submitter)
+        return ModelEventRefUpdated(None, None, user)

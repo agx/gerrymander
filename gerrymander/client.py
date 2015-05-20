@@ -34,17 +34,23 @@ class ClientLive(object):
         self.keyfile = keyfile
 
     def _run_async(self, argv):
+
+        def _preexec_fn():
+            os.setpgrp()
+
         stdout = subprocess.PIPE
         stderr = subprocess.PIPE
         LOG.debug("Running cmd %s" % " ".join(argv))
         sp = subprocess.Popen(argv,
                               stdout=stdout,
                               stderr=stderr,
-                              stdin=None)
+                              stdin=None,
+                              preexec_fn=_preexec_fn)
         return sp
 
     def _build_argv(self, cmdargv):
         argv = ['ssh']
+        argv.extend(["-T", "-o", "BatchMode=yes", "-e", "none"])
         if self.port:
             argv.extend(["-p", str(self.port)])
         if self.keyfile and os.path.isfile(self.keyfile):
@@ -155,12 +161,17 @@ class ClientCaching(ClientLive):
         file = self.cachedir + "/" + m.hexdigest() + ".json"
         if not os.path.exists(file) or self.refresh:
             sp = self._run_async(argv)
-            with open(file, "wb") as f:
-                while True:
-                    line = sp.stdout.readline()
-                    if not line:
-                        break
-                    f.write(line)
+            try:
+                with open(file, "wb") as f:
+                    while True:
+                        line = sp.stdout.readline()
+                        if not line:
+                            break
+                        f.write(line)
+            except:
+                os.unlink(file)
+                raise
+
             sp.wait()
             if sp.returncode != 0:
                 os.unlink(file)
